@@ -7,7 +7,7 @@ import AdminModal from './AdminModal';
 import EpisodeSelector from './EpisodeSelector';
 import ContentDetailsModal from './ContentDetailsModal';
 
-const Navbar = ({ profile, onOpenAdmin, onLogout }) => {
+const Navbar = ({ profile, onOpenAdmin, onLogout, activeUsers = [] }) => {
     const [scrolled, setScrolled] = useState(false);
     const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
 
@@ -32,6 +32,21 @@ const Navbar = ({ profile, onOpenAdmin, onLogout }) => {
             </div>
 
             <div className="flex items-center gap-6 text-gray-300">
+
+                {/* Active Users Indicator */}
+                <div className="flex items-center -space-x-2 mr-2">
+                    {activeUsers.map((user) => (
+                        <div key={user.name} className="relative group" title={`${user.name} is watching`}>
+                            <img
+                                src={user.avatar}
+                                alt={user.name}
+                                className="w-8 h-8 rounded-full border-2 border-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]"
+                            />
+                            <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 rounded-full border border-black transform translate-y-1/3 translate-x-1/3"></div>
+                        </div>
+                    ))}
+                </div>
+
                 {/* Admin Button directly in Navbar for Mert */}
                 {profile.name === 'Mert' && (
                     <button onClick={onOpenAdmin} className="text-cyan-400 hover:text-cyan-300 transition-colors" title="Add Content">
@@ -202,7 +217,7 @@ const ContentRow = ({ title, movies, onPlay, profile, onEdit }) => {
     );
 };
 
-const HomeScreen = ({ profile, onPlayContent, onLogout, onOpenDetails }) => {
+const HomeScreen = ({ profile, onPlayContent, onLogout, onOpenDetails, activeUsers }) => {
     const [contentList, setContentList] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
     const [isAdminOpen, setIsAdminOpen] = useState(false);
@@ -283,7 +298,7 @@ const HomeScreen = ({ profile, onPlayContent, onLogout, onOpenDetails }) => {
 
     return (
         <div className="min-h-screen bg-midnight pb-20">
-            <Navbar profile={profile} onOpenAdmin={() => setIsAdminOpen(true)} onLogout={onLogout} />
+            <Navbar profile={profile} onOpenAdmin={() => setIsAdminOpen(true)} onLogout={onLogout} activeUsers={activeUsers} />
 
             {/* Dynamic Hero Section - only show when content exists */}
             {featuredMovie && (

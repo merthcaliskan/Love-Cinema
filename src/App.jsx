@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ref, onValue, update, set } from 'firebase/database';
+import { ref, onValue, update, set, onDisconnect } from 'firebase/database';
 import { db } from './firebase';
 import VideoPlayer from './components/VideoPlayer';
 import ControlLayer from './components/ControlLayer';
 import LandingView from './components/LandingView';
 import ChatOverlay from './components/ChatOverlay';
 import ProfileGate from './components/ProfileGate';
-import HomeScreen from './components/HomeScreen'; // <--- New Home
+import HomeScreen from './components/HomeScreen';
 import { Home, Maximize, Minimize } from 'lucide-react';
 import PremiumPlayerControls from './components/PremiumPlayerControls';
+import JoinInvitation from './components/JoinInvitation'; // <--- New Invite Component
 import { motion, AnimatePresence } from 'framer-motion';
 
 import ContentDetailsModal from './components/ContentDetailsModal';
@@ -19,62 +20,133 @@ function App() {
     isPlaying: false,
     timestamp: 0,
     lastUpdated: 0,
-    playlist: [],     // Persisted Playlist
-    episodeIndex: 0   // Persisted Index
+    playlist: [],
+    episodeIndex: 0,
+    startedBy: '' // <--- Track who started it
   });
   const [isFirebaseLoaded, setIsFirebaseLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentProfile, setCurrentProfile] = useState(null);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1); // 0 to 1
+  const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
-  const [selectedContent, setSelectedContent] = useState(null); // <--- Lifted State
+  const [selectedContent, setSelectedContent] = useState(null);
+
+  // Invite & Presence State
+  const [incomingInvitation, setIncomingInvitation] = useState(null); // { title: '...', startedBy: '...' }
+  const [activeUsers, setActiveUsers] = useState([]);
 
   const appRef = useRef(null);
   const seekingRef = useRef(false);
   const seekTimeoutRef = useRef(null);
   const [seekCommand, setSeekCommand] = useState(null);
 
-  const latestSessionRef = useRef(session); // Ref to access latest state in listener
+  const latestSessionRef = useRef(session);
   const ignoreRemoteUpdatesUntil = useRef(0);
+  const isFirebaseLoadedRef = useRef(false);
 
   // Keep Ref updated
   useEffect(() => {
     latestSessionRef.current = session;
   }, [session]);
 
-  // Ref to track if initial load is done (avoids stale closure in onValue)
-  const isFirebaseLoadedRef = useRef(false);
+  // --- PRESENCE SYSTEM ---
+  useEffect(() => {
+    if (!currentProfile) return;
 
-  // Subscribe to Session Data
+    // 1. Heartbeat: Write to presence/{profileName} every 30s
+    const userRef = ref(db, `presence/${currentProfile.name}`);
+    const beat = () => {
+      set(userRef, {
+        name: currentProfile.name,
+        avatar: currentProfile.avatar,
+        lastSeen: Date.now()
+      });
+    };
+
+    // Set initial presence and set disconnect logic
+    beat();
+    onDisconnect(userRef).remove();
+
+    const interval = setInterval(beat, 30000); // 30s heartbeat
+
+    // 2. Listen for other active users
+    const presenceRef = ref(db, 'presence');
+    const unsubscribe = onValue(presenceRef, (snapshot) => {
+      const users = [];
+      const now = Date.now();
+      snapshot.forEach((child) => {
+        const u = child.val();
+        // Filter out stale users (> 2 mins inactivity)
+        if (now - u.lastSeen < 120000 && u.name !== currentProfile.name) {
+          users.push(u);
+        }
+      });
+      setActiveUsers(users);
+    });
+
+    return () => {
+      clearInterval(interval);
+      unsubscribe();
+      set(userRef, null); // Remove self on unmount/logout
+    };
+  }, [currentProfile]);
+
+
+  // --- SESSION LISTENER (Smart Join Logic) ---
   useEffect(() => {
     const sessionRef = ref(db, 'session');
     const unsubscribe = onValue(sessionRef, (snapshot) => {
       const data = snapshot.val();
       const now = Date.now();
 
-      console.log(`[Firebase] Update received. URL: ${data?.url}, TS: ${data?.timestamp}, Ignore: ${now < ignoreRemoteUpdatesUntil.current}`);
+      console.log(`[Firebase] Update. URL: ${data?.url}, TS: ${data?.timestamp}`);
 
-      // Ignore stale updates if we just performed a local action
       if (now < ignoreRemoteUpdatesUntil.current) return;
 
       const currentSession = latestSessionRef.current;
 
       if (data) {
-        // Prevent auto-play on initial load (page refresh)
+        // SCENARIO 1: Initial Load
         if (!isFirebaseLoadedRef.current) {
           console.log("[Firebase] Initial Load - Preventing auto-play");
+
+          // If there is active content, show invitation instead of playing
+          if (data.url && data.isPlaying) {
+            setIncomingInvitation({
+              title: data.title,
+              episodeTitle: data.playlist?.[data.episodeIndex]?.title,
+              startedBy: data.startedBy,
+              data: data
+            });
+          }
+
           setSession({
             ...data,
-            url: '', // Force empty URL locally so we land on Home Screen
+            url: '',
             isPlaying: false,
             timestamp: data.timestamp || 0
           });
           isFirebaseLoadedRef.current = true;
-          setIsFirebaseLoaded(true); // Trigger re-render
+          setIsFirebaseLoaded(true);
+
         } else {
-          // ... normal update logic
+          // SCENARIO 2: Runtime Update
+
+          // If we are NOT watching anything, and a remote session starts...
+          if (!currentSession.url && data.url && data.isPlaying) {
+            console.log("[Firebase] Remote session started while we are idle. Show Invite.");
+            setIncomingInvitation({
+              title: data.title,
+              episodeTitle: data.playlist?.[data.episodeIndex]?.title,
+              startedBy: data.startedBy,
+              data: data
+            });
+            return;
+          }
+
+          // If we ARE watching, sync normally
           const diff = Math.abs(data.timestamp - currentSession.timestamp);
           const isRemoteSeek = diff > 2.5;
 
@@ -95,85 +167,70 @@ function App() {
     return () => unsubscribe();
   }, []);
 
-  // ... (handlers)
 
-  // Shared Logic for Starting Playback (from Card or Modal)
+  // --- HANDLERS ---
+
+  const handleJoinSession = () => {
+    if (!incomingInvitation) return;
+
+    // Sync local state to match the remote invite data
+    const remoteData = incomingInvitation.data;
+
+    setSession(remoteData);
+    setIncomingInvitation(null); // clear invite
+    setIsFullscreen(true);
+
+    // Optionally trigger a seek if needed (though session sync should handle it)
+    setSeekCommand({ time: remoteData.timestamp, id: Date.now() });
+  };
+
+  const handleIgnoreInvite = () => {
+    setIncomingInvitation(null);
+  };
+
   const handlePlayContent = (contentData, startTitle, startUrl) => {
+    // ... (Log & Normalize Logic same as before)
     console.log(`[handlePlayContent] Request: Title=${startTitle}, URL=${startUrl}`);
 
     let epList = [];
     let startIdx = 0;
-
-    // Helper to normalize URL for comparison (remove query params)
     const normalize = (u) => u ? u.split('?')[0] : '';
     const normStart = normalize(startUrl);
 
-    // If it's a series (has episodes), setup playlist
     if (contentData.episodes) {
       epList = contentData.episodes.map((ep, idx) => ({
         url: ep.url,
         title: `${contentData.title}: ${ep.title || 'Episode ' + (ep.number || idx + 1)}`,
         index: idx
       }));
-
-      // Find index using normalized URLs to avoid query param mismatches
-      const clickedEp = contentData.episodes.find(e => {
-        const n1 = normalize(e.url);
-        const match = n1 === normStart;
-        console.log(`[URL Check] Start=${normStart} vs Ep=${n1} -> Match=${match}`);
-        return match;
-      });
-
-      if (clickedEp) {
-        startIdx = contentData.episodes.indexOf(clickedEp);
-      } else {
-        console.warn("[handlePlayContent] Normalized match failed. Trying fallback...");
-        // Fallback: Try exact match
-        const exact = contentData.episodes.find(e => e.url === startUrl);
-        if (exact) {
-          startIdx = contentData.episodes.indexOf(exact);
-          console.log("[handlePlayContent] Exact match found!");
-        } else {
-          console.error("[handlePlayContent] No match found for URL. Defaulting to 0.");
-        }
-      }
+      const clickedEp = contentData.episodes.find(e => normalize(e.url) === normStart) || contentData.episodes.find(e => e.url === startUrl);
+      if (clickedEp) startIdx = contentData.episodes.indexOf(clickedEp);
     } else {
-      // Movie
       epList = [{ url: startUrl, title: startTitle, index: 0 }];
     }
 
-    console.log(`[handlePlayContent] Setting Session. Index=${startIdx}`);
-
-    // CRITICAL: Reset seek command so the new player doesn't "resume" the old timestamp
     setSeekCommand(null);
-
     const now = Date.now();
     ignoreRemoteUpdatesUntil.current = now + 2000;
-    console.log(`[handlePlayContent] Ignore Ref set to: ${now + 2000}`);
 
-    setSession({
+    const newSessionState = {
       url: startUrl,
       title: startTitle,
       playlist: epList,
       episodeIndex: startIdx,
       isPlaying: true, // Auto-start
-      timestamp: 0
-    });
+      timestamp: 0,
+      startedBy: currentProfile?.name || 'Admin' // <--- Add Caller Name
+    };
+
+    setSession(newSessionState);
     setIsFullscreen(true);
 
-    // Sync to Firebase
     set(ref(db, 'messages'), null);
-    update(ref(db, 'session'), {
-      url: startUrl,
-      title: startTitle,
-      playlist: epList,
-      episodeIndex: startIdx,
-      isPlaying: true,
-      timestamp: 0
-    });
+    update(ref(db, 'session'), newSessionState);
   };
 
-  // Handlers for Player
+  // ... (handlePlay, handlePause, handleProgress etc. - KEEP SAME)
   const handlePlay = () => update(ref(db, 'session'), { isPlaying: true });
   const handlePause = () => update(ref(db, 'session'), { isPlaying: false });
 
@@ -183,25 +240,20 @@ function App() {
   };
 
   const togglePlay = () => {
-    console.log("[App] togglePlay triggered");
     if (session.isPlaying) {
-      update(ref(db, 'session'), {
-        isPlaying: false,
-        timestamp: session.timestamp
-      });
+      update(ref(db, 'session'), { isPlaying: false, timestamp: session.timestamp });
     } else {
       update(ref(db, 'session'), { isPlaying: true });
     }
   };
+
   const resetSession = () => {
     ignoreRemoteUpdatesUntil.current = Date.now() + 1000;
     update(ref(db, 'session'), { url: '', isPlaying: false, playlist: [], episodeIndex: 0 });
     set(ref(db, 'messages'), null);
   };
 
-  const handleDuration = (dur) => {
-    setDuration(dur);
-  };
+  const handleDuration = (dur) => setDuration(dur);
 
   const triggerSeek = (newTime) => {
     setSeekCommand({ time: newTime, id: Date.now() });
@@ -209,85 +261,58 @@ function App() {
     update(ref(db, 'session'), { timestamp: newTime });
   };
 
-  const handleSeek = (time) => {
-    triggerSeek(time);
-  };
-
-  const handleSeekRw = () => {
-    triggerSeek(Math.max(0, session.timestamp - 10));
-  };
-
+  const handleSeek = (time) => triggerSeek(time);
+  const handleSeekRw = () => triggerSeek(Math.max(0, session.timestamp - 10));
   const handleSeekFf = () => {
     const nextTime = session.timestamp + 10;
-    if (duration > 0) {
-      triggerSeek(Math.min(duration, nextTime));
-    } else {
-      triggerSeek(nextTime);
-    }
+    triggerSeek(duration > 0 ? Math.min(duration, nextTime) : nextTime);
   };
 
   const handleNextEpisode = () => {
+    // ... logic same as existing, just ensure `startedBy` is preserved or updated
     const playlist = session.playlist || [];
     const currentIdx = session.episodeIndex || 0;
-
     if (currentIdx < playlist.length - 1) {
       const nextIdx = currentIdx + 1;
       const nextEp = playlist[nextIdx];
-
       ignoreRemoteUpdatesUntil.current = Date.now() + 2000;
-
-      setSession(prev => ({
-        ...prev,
+      const nextState = {
+        ...session,
         url: nextEp.url,
         title: nextEp.title,
         episodeIndex: nextIdx,
         timestamp: 0,
         isPlaying: true
-      }));
-
+      };
+      setSession(nextState);
       set(ref(db, 'messages'), null);
-      update(ref(db, 'session'), {
-        url: nextEp.url,
-        title: nextEp.title,
-        episodeIndex: nextIdx,
-        timestamp: 0,
-        isPlaying: true
-      });
+      update(ref(db, 'session'), { ...nextState, startedBy: currentProfile?.name || 'User' });
     }
   };
 
   const handlePrevEpisode = () => {
+    // ... logic same as existing
     const playlist = session.playlist || [];
     const currentIdx = session.episodeIndex || 0;
-
     if (currentIdx > 0) {
       const prevIdx = currentIdx - 1;
       const prevEp = playlist[prevIdx];
-
       ignoreRemoteUpdatesUntil.current = Date.now() + 2000;
-
-      setSession(prev => ({
-        ...prev,
+      const prevState = {
+        ...session,
         url: prevEp.url,
         title: prevEp.title,
         episodeIndex: prevIdx,
         timestamp: 0,
         isPlaying: true
-      }));
-
+      };
+      setSession(prevState);
       set(ref(db, 'messages'), null);
-      update(ref(db, 'session'), {
-        url: prevEp.url,
-        title: prevEp.title,
-        episodeIndex: prevIdx,
-        timestamp: 0,
-        isPlaying: true
-      });
+      update(ref(db, 'session'), { ...prevState, startedBy: currentProfile?.name || 'User' });
     }
   };
 
   const handleClosePlayback = () => {
-    console.log("[App] handleClosePlayback triggered. Source: ???");
     ignoreRemoteUpdatesUntil.current = Date.now() + 500;
     setSession(prev => ({ ...prev, isPlaying: false, url: null }));
     setIsFullscreen(false);
@@ -295,30 +320,19 @@ function App() {
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-      if (appRef.current.requestFullscreen) {
-        appRef.current.requestFullscreen();
-      } else if (appRef.current.webkitRequestFullscreen) {
-        appRef.current.webkitRequestFullscreen();
-      }
+      if (appRef.current.requestFullscreen) { appRef.current.requestFullscreen(); }
+      else if (appRef.current.webkitRequestFullscreen) { appRef.current.webkitRequestFullscreen(); }
     } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
-      } else if (document.webkitExitFullscreen) {
-        document.webkitExitFullscreen();
-      }
+      if (document.exitFullscreen) { document.exitFullscreen(); }
+      else if (document.webkitExitFullscreen) { document.webkitExitFullscreen(); }
     }
   };
 
   const handleVolumeChange = (newVolume) => {
     setVolume(newVolume);
-    if (newVolume > 0 && isMuted) {
-      setIsMuted(false);
-    }
+    if (newVolume > 0 && isMuted) setIsMuted(false);
   };
-
-  const toggleMute = () => {
-    setIsMuted(!isMuted);
-  };
+  const toggleMute = () => setIsMuted(!isMuted);
 
   useEffect(() => {
     const handleFsChange = () => {
@@ -333,27 +347,37 @@ function App() {
     };
   }, []);
 
-  if (!isFirebaseLoaded) {
-    return <div className="w-screen h-screen bg-black" />;
-  }
-
-  if (isLoading) {
-    console.log("Render: isLoading is TRUE");
-    return <div className="h-screen w-screen bg-black flex items-center justify-center text-white">Loading Cinema...</div>;
-  }
-
-  if (!currentProfile) {
-    console.log("Render: Rendering ProfileGate");
-    return <ProfileGate onSelectProfile={setCurrentProfile} />;
-  }
+  if (!isFirebaseLoaded) return <div className="w-screen h-screen bg-black" />;
+  if (isLoading) return <div className="h-screen w-screen bg-black flex items-center justify-center text-white">Loading Cinema...</div>;
+  if (!currentProfile) return <ProfileGate onSelectProfile={setCurrentProfile} />;
 
   const isPlaybackActive = session.url && session.isPlaying !== undefined;
-  console.log(`Render: Main App. Active=${isPlaybackActive}, URL=${session.url}, Playing=${session.isPlaying}`);
 
   return (
     <div className="relative w-full h-screen bg-midnight overflow-hidden">
 
-      {/* Base Layer: HomeScreen - Animated Entrance */}
+      {/* INVITATION POPUP */}
+      <AnimatePresence>
+        {incomingInvitation && !isPlaybackActive && (
+          <motion.div
+            initial={{ y: -100, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -100, opacity: 0 }}
+            className="fixed top-0 left-0 w-full z-[60] flex justify-center pointer-events-none"
+          >
+            <div className="pointer-events-auto mt-4">
+              <JoinInvitation
+                title={incomingInvitation.title}
+                episodeTitle={incomingInvitation.episodeTitle}
+                startedBy={incomingInvitation.startedBy}
+                onJoin={handleJoinSession}
+                onIgnore={handleIgnoreInvite}
+              />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <motion.div
         className="w-full h-full overflow-y-auto no-scrollbar"
         initial={{ opacity: 0, scale: 1.2, filter: "blur(10px)" }}
@@ -365,10 +389,10 @@ function App() {
           onLogout={() => setCurrentProfile(null)}
           onPlayContent={handlePlayContent}
           onOpenDetails={setSelectedContent}
+          activeUsers={activeUsers} // <--- Pass Active Users
         />
       </motion.div>
 
-      {/* Layer 2: Details Modal (Fixed above Home, below Player) */}
       <AnimatePresence>
         {selectedContent && (
           <ContentDetailsModal
@@ -386,7 +410,6 @@ function App() {
         )}
       </AnimatePresence>
 
-      {/* Overlay Layer: Cinema/Playback - Slides up from bottom */}
       <AnimatePresence>
         {isPlaybackActive && (
           <motion.div
@@ -396,10 +419,7 @@ function App() {
             initial={{ opacity: 0, scale: 0.9, filter: "blur(10px)" }}
             animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
             exit={{ opacity: 0, scale: 0.9, filter: "blur(10px)" }}
-            transition={{
-              duration: 0.6,
-              ease: [0.22, 1, 0.36, 1] // Custom cubic bezier for premium feel
-            }}
+            transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
           >
             <VideoPlayer
               key={session.url}
@@ -425,18 +445,14 @@ function App() {
                 played={session.timestamp}
                 duration={duration}
                 onBack={handleClosePlayback}
-
                 hasNextEpisode={session.playlist && session.episodeIndex < session.playlist.length - 1}
                 onNextEpisode={handleNextEpisode}
-
                 hasPrevEpisode={session.playlist && session.episodeIndex > 0}
                 onPrevEpisode={handlePrevEpisode}
-
                 isMuted={isMuted}
                 onToggleMute={toggleMute}
                 volume={volume}
                 onVolumeChange={handleVolumeChange}
-
                 isFullscreen={isFullscreen}
                 onToggleFullscreen={toggleFullscreen}
               />
