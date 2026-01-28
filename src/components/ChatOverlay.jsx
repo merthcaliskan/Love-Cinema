@@ -193,7 +193,19 @@ const ChatOverlay = ({ isVisible, profile }) => {
             });
             setVideoStream(stream);
 
-            const recorder = new MediaRecorder(stream);
+            // Detect supported MIME type
+            let mimeType = 'video/webm';
+            if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
+                mimeType = 'video/webm;codecs=vp8';
+            } else if (MediaRecorder.isTypeSupported('video/webm')) {
+                mimeType = 'video/webm';
+            } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+                mimeType = 'video/mp4';
+            }
+
+            console.log("Recording using MIME type:", mimeType);
+
+            const recorder = new MediaRecorder(stream, { mimeType });
             videoRecorderRef.current = recorder;
             videoChunksRef.current = [];
             videoCancelledRef.current = false; // Reset cancelled flag
@@ -211,7 +223,8 @@ const ChatOverlay = ({ isVisible, profile }) => {
                     return;
                 }
 
-                const videoBlob = new Blob(videoChunksRef.current, { type: 'video/webm' });
+                // Use the SAME mimeType for the Blob
+                const videoBlob = new Blob(videoChunksRef.current, { type: mimeType });
                 const reader = new FileReader();
                 reader.readAsDataURL(videoBlob);
                 reader.onloadend = () => {
