@@ -111,8 +111,16 @@ const VideoPlayer = ({ url, playing, onPlay, onPause, onProgress, onDuration, se
         }
     }, [seekCommand, isNative]);
 
+    // -- GOOGLE DRIVE CHECK --
+    const isGoogleDrive = url?.includes('drive.google.com');
+    if (isGoogleDrive && !error) {
+        // We set an error immediately because we know these won't sync/play correctly without an iframe
+        // and the user specifically requested Sync.
+        setError("Google Drive linkleri 'Senkronize İzleme' özelliğini desteklemez. Lütfen Dropbox veya direkt .mp4 linki kullanın.");
+    }
+
     // -- RENDER NATIVE --
-    if (isNative) {
+    if (isNative || isGoogleDrive) { // Fallback to native structure to show the error overlay
         return (
             <div className="absolute inset-0 w-full h-full bg-black flex items-center justify-center pointer-events-auto">
                 <video
@@ -126,14 +134,21 @@ const VideoPlayer = ({ url, playing, onPlay, onPause, onProgress, onDuration, se
                     onLoadedMetadata={() => onDuration && onDuration(videoRef.current?.duration || 0)}
                     onError={(e) => {
                         console.error("Native Video Error:", e.nativeEvent);
-                        setError("Video playback failed. Source may be expired or unsupported.");
+                        // If it's Drive, we likely already set a specific error, but if not:
+                        if (!isGoogleDrive) setError("Video oynatılamadı. Linkin direkt .mp4 dosyası olduğundan emin olun.");
                     }}
                 />
                 {error && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-20">
-                        <div className="text-white text-center p-4">
-                            <p className="text-red-500 font-bold mb-2">Playback Error</p>
-                            <p className="text-sm text-gray-300">{error}</p>
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/90 z-20 px-10">
+                        <div className="text-white text-center p-6 border border-red-500/30 rounded-xl bg-red-900/10 backdrop-blur-md max-w-lg">
+                            <p className="text-red-500 font-bold text-xl mb-3">Oynatma Hatası</p>
+                            <p className="text-base text-gray-300 leading-relaxed">{error}</p>
+                            {isGoogleDrive && (
+                                <div className="mt-4 text-xs text-gray-400 bg-black/40 p-3 rounded text-left">
+                                    <p className="font-bold text-gray-300 mb-1">Neden?</p>
+                                    Google Drive videoları, virüs taraması ve gizlilik engelleri yüzünden dışarıdan kontrol edilemez (oynat/durdur yapılamaz). Bu da "Beraber İzle" özelliğini bozar.
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}

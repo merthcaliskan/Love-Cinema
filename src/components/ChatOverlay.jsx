@@ -292,10 +292,13 @@ const ChatOverlay = ({ isVisible, profile }) => {
         }
     };
 
-    const visibleMessages = messages.filter(msg => (now - msg.timestamp) < 20000);
+    // Increase duration to 60 seconds (was 20s)
+    const visibleMessages = messages.filter(msg => (now - msg.timestamp) < 60000);
 
     return (
-        <div className={`fixed right-0 top-32 bottom-32 w-80 lg:w-96 flex flex-col justify-end p-6 z-40 transition-opacity duration-300 pointer-events-none ${isVisible ? 'opacity-100' : 'opacity-0'}`}>
+        // Changed: Removed 'opacity-0' logic. Overlay is now always visible (opacity-100).
+        // Since it has 'pointer-events-none', it won't block the video interactability unless clicking a message.
+        <div className={`fixed right-0 top-32 bottom-32 w-80 lg:w-96 flex flex-col justify-end p-6 z-40 transition-opacity duration-300 pointer-events-none opacity-100`}>
 
             {/* Messages Area */}
             <div className="flex-1 overflow-y-auto mb-4 space-y-3 no-scrollbar mask-image-b pointer-events-auto">

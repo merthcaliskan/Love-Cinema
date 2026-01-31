@@ -45,11 +45,16 @@ function App() {
   const latestSessionRef = useRef(session);
   const ignoreRemoteUpdatesUntil = useRef(0);
   const isFirebaseLoadedRef = useRef(false);
+  const currentProfileRef = useRef(currentProfile); // <--- Ref for Profile
 
-  // Keep Ref updated
+  // Keep Refs updated
   useEffect(() => {
     latestSessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    currentProfileRef.current = currentProfile;
+  }, [currentProfile]);
 
   // --- PRESENCE SYSTEM ---
   useEffect(() => {
@@ -93,6 +98,16 @@ function App() {
     };
   }, [currentProfile]);
 
+  // Clean up self-invites if they exist when logging in
+  useEffect(() => {
+    if (currentProfile && incomingInvitation) {
+      if (incomingInvitation.startedBy === currentProfile.name) {
+        console.log("Blocking self-invite upon login");
+        setIncomingInvitation(null);
+      }
+    }
+  }, [currentProfile, incomingInvitation]);
+
 
   // --- SESSION LISTENER (Smart Join Logic) ---
   useEffect(() => {
@@ -106,14 +121,17 @@ function App() {
       if (now < ignoreRemoteUpdatesUntil.current) return;
 
       const currentSession = latestSessionRef.current;
+      const myProfileName = currentProfileRef.current?.name;
 
       if (data) {
         // SCENARIO 1: Initial Load
         if (!isFirebaseLoadedRef.current) {
           console.log("[Firebase] Initial Load - Preventing auto-play");
 
-          // If there is active content, show invitation instead of playing
-          if (data.url && data.isPlaying) {
+          const isSelf = data.startedBy && myProfileName && data.startedBy === myProfileName;
+
+          // If there is active content AND IT IS NOT FROM ME, show invitation
+          if (data.url && data.isPlaying && !isSelf) {
             setIncomingInvitation({
               title: data.title,
               episodeTitle: data.playlist?.[data.episodeIndex]?.title,
@@ -125,7 +143,7 @@ function App() {
           setSession({
             ...data,
             url: '',
-            isPlaying: false,
+            isPlaying: false, // Don't auto-join on refresh, wait for invite accept
             timestamp: data.timestamp || 0
           });
           isFirebaseLoadedRef.current = true;
@@ -136,6 +154,12 @@ function App() {
 
           // If we are NOT watching anything, and a remote session starts...
           if (!currentSession.url && data.url && data.isPlaying) {
+            // Check if it's my own session (race condition safety)
+            if (data.startedBy === myProfileName) {
+              console.log("[Firebase] Updates match my profile, ignoring as local start.");
+              return;
+            }
+
             console.log("[Firebase] Remote session started while we are idle. Show Invite.");
             setIncomingInvitation({
               title: data.title,
@@ -222,6 +246,9 @@ function App() {
       timestamp: 0,
       startedBy: currentProfile?.name || 'Admin' // <--- Add Caller Name
     };
+
+    // CRITICAL: Update Ref IMMEDIATELY to prevent "Remote Session" detection logic from triggering on own update
+    latestSessionRef.current = newSessionState;
 
     setSession(newSessionState);
     setIsFullscreen(true);
