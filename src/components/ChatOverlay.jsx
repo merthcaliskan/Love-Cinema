@@ -1,8 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ref, push, onValue, query, limitToLast } from 'firebase/database';
 import { db } from '../firebase';
-import { Send, Mic, Volume2, Camera, Play, Trash2, Check } from 'lucide-react';
+import { Send, Mic, Volume2, Camera, Play, Trash2, Check, Smile } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+
+const STICKERS = [
+    { id: 'love', emoji: '❤️', label: 'Love' },
+    { id: 'laugh', emoji: '😂', label: 'Laugh' },
+    { id: 'scare', emoji: '😱', label: 'Scare' },
+    { id: 'cry', emoji: '😭', label: 'Cry' },
+    { id: 'surprise', emoji: '😲', label: 'Surprise' },
+    { id: 'confuse', emoji: '🤔', label: 'Confuse' }
+];
+
+const stickerVariants = {
+    love: { scale: [1, 1.3, 1], transition: { repeat: Infinity, duration: 0.8 } },
+    laugh: { rotate: [0, -15, 15, 0], y: [0, -10, 0], transition: { repeat: Infinity, duration: 0.6 } },
+    scare: { x: [-3, 3, -3, 3], transition: { repeat: Infinity, duration: 0.1 } },
+    cry: { y: [0, 10, 0], duration: 1.5, transition: { repeat: Infinity, duration: 1.2 } },
+    surprise: { scale: [1, 1.2, 1], rotate: [0, 5, -5, 0], transition: { repeat: Infinity, duration: 1.5 } },
+    confuse: { rotate: [0, -20, 0, 20, 0], transition: { repeat: Infinity, duration: 2 } }
+};
 
 const ChatOverlay = ({ isVisible, profile }) => {
     const [messages, setMessages] = useState([]);
@@ -14,6 +32,7 @@ const ChatOverlay = ({ isVisible, profile }) => {
     const [isRecordingVideo, setIsRecordingVideo] = useState(false);
     const [videoStream, setVideoStream] = useState(null);
     const [playingVideoId, setPlayingVideoId] = useState(null);
+    const [isStickerPickerOpen, setIsStickerPickerOpen] = useState(false);
 
     // Refs
     const chatRef = useRef(null);
@@ -21,7 +40,6 @@ const ChatOverlay = ({ isVisible, profile }) => {
     const mediaRecorderRef = useRef(null);
     const audioChunksRef = useRef([]);
     const lastPlayedIdRef = useRef(null); // Track last auto-played message
-    const longPressTimer = useRef(null); // Track Hold-to-Record
     const videoPreviewRef = useRef(null); // Video preview element
     const videoRecorderRef = useRef(null); // MediaRecorder for video
     const videoChunksRef = useRef([]); // Video data chunks
@@ -98,6 +116,16 @@ const ChatOverlay = ({ isVisible, profile }) => {
         setIsInputOpen(false);
     };
 
+    const handleSendSticker = (stickerId) => {
+        push(ref(db, 'chat'), {
+            type: 'sticker',
+            stickerId: stickerId,
+            timestamp: Date.now(),
+            user: profile?.name || 'Guest'
+        });
+        setIsStickerPickerOpen(false);
+    };
+
     // --- Voice Recording Logic ---
     const startRecording = async () => {
         try {
@@ -164,17 +192,6 @@ const ChatOverlay = ({ isVisible, profile }) => {
     useEffect(() => {
         scrollToBottom();
     }, [messages]);
-
-    const toggleInput = () => {
-        if (!isInputOpen) {
-            setIsInputOpen(true);
-            setTimeout(() => chatRef.current?.focus(), 100);
-        } else if (inputText.trim()) {
-            setIsInputOpen(false);
-        } else {
-            setIsInputOpen(false);
-        }
-    };
 
     const playAudio = (audioSource) => {
         try {
@@ -317,7 +334,16 @@ const ChatOverlay = ({ isVisible, profile }) => {
                                     <span className="text-[10px] font-bold text-white/50 uppercase tracking-widest">{msg.user}</span>
                                 </div>
 
-                                {msg.type === 'audio' ? (
+                                {msg.type === 'sticker' ? (
+                                    /* Animation Sticker Bubble */
+                                    <motion.div
+                                        animate={stickerVariants[msg.stickerId] || {}}
+                                        className="text-6xl drop-shadow-[0_0_15px_rgba(255,255,255,0.4)]"
+                                        title={msg.stickerId}
+                                    >
+                                        {STICKERS.find(s => s.id === msg.stickerId)?.emoji || '✨'}
+                                    </motion.div>
+                                ) : msg.type === 'audio' ? (
                                     /* Audio Bubble Visual */
                                     <motion.div
                                         whileTap={{ scale: 0.9 }}
@@ -379,7 +405,32 @@ const ChatOverlay = ({ isVisible, profile }) => {
             </div>
 
             {/* Morphing Input Bar - Transforms Between Modes */}
-            <div className="flex justify-end pointer-events-auto">
+            <div className="flex justify-end pointer-events-auto items-end gap-2">
+
+                {/* STICKER PICKER POPUP */}
+                <AnimatePresence>
+                    {isStickerPickerOpen && (
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.8, y: 20 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.8, y: 20 }}
+                            className="absolute bottom-16 right-0 bg-black/80 backdrop-blur-xl border border-white/20 rounded-2xl p-4 shadow-2xl grid grid-cols-3 gap-4"
+                        >
+                            {STICKERS.map(sticker => (
+                                <button
+                                    key={sticker.id}
+                                    onClick={() => handleSendSticker(sticker.id)}
+                                    className="text-3xl hover:scale-125 transition-transform p-2 bg-white/5 rounded-xl hover:bg-white/10 active:scale-95"
+                                    title={sticker.label}
+                                >
+                                    {sticker.emoji}
+                                </button>
+                            ))}
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
+
                 <motion.div
                     layout
                     transition={{ type: "spring", damping: 25, stiffness: 300 }}
@@ -416,6 +467,17 @@ const ChatOverlay = ({ isVisible, profile }) => {
                                         className="w-9 h-9 rounded-xl flex items-center justify-center bg-white/10 text-white/60 hover:bg-white/20 hover:text-white transition-all duration-300"
                                     >
                                         <Camera size={16} />
+                                    </motion.button>
+
+                                    <motion.button
+                                        type="button"
+                                        onClick={() => setIsStickerPickerOpen(!isStickerPickerOpen)}
+                                        whileHover={{ scale: 1.05 }}
+                                        whileTap={{ scale: 0.95 }}
+                                        className={`w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-300 
+                                            ${isStickerPickerOpen ? 'bg-yellow-400 text-black' : 'bg-white/10 text-white/60 hover:bg-yellow-400/20 hover:text-yellow-300'}`}
+                                    >
+                                        <Smile size={16} />
                                     </motion.button>
                                 </div>
 
